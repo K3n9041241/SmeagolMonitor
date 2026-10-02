@@ -9,10 +9,13 @@ Standard library only (pyserial is optional).
 Features:
 - HTTP/HTTPS packet receiver
 - Raspberry Pi API-key authentication
+- Monitor viewer authentication
 - Vehicle state API
 - KML course loading
 - CSV logging
 - Communication-gap logging
+- Current CSV download
+- Current GAP CSV download
 - Static Smeagol Monitor UI
 - Render/cloud PORT environment support
 """
@@ -191,7 +194,8 @@ def parse_packet(raw):
 
     if not all(
         math.isfinite(number)
-        for number in numbers
+        for number
+        in numbers
     ):
 
         raise ValueError(
@@ -329,11 +333,14 @@ def load_course(path):
                 features.append(
                     dict(
                         type="Feature",
+
                         properties={
                             "name": name
                         },
+
                         geometry=dict(
                             type=kind,
+
                             coordinates=(
                                 coords[0]
                                 if kind == "Point"
@@ -362,9 +369,7 @@ class Receiver:
         gap_seconds=3.0
     ):
 
-        self.lock = (
-            threading.Lock()
-        )
+        self.lock = threading.Lock()
 
         self.vehicles = {}
 
@@ -514,12 +519,17 @@ class Receiver:
                     timezone.utc
                 ).isoformat()
             ),
+
             received_epoch=now,
+
             source=source,
+
             raw=raw,
+
             base_received_epoch=(
                 base_received_epoch
             ),
+
             base_interval_s=(
                 base_interval_s
             ),
@@ -555,8 +565,9 @@ class Receiver:
 
 
             #
-            # JSONL raw log
+            # RAW JSONL LOG
             #
+
             with self.log_path.open(
                 "a",
                 encoding="utf-8"
@@ -640,10 +651,11 @@ class Receiver:
 
 
                 #
-                # Current 7-field packet:
+                # Current packet format:
                 #
                 # V001,LAT,LON,SPEED,SAT,G,STATUS
                 #
+
                 g = (
                     packet["sensors"][0]
                     if
@@ -655,10 +667,16 @@ class Receiver:
                 )
 
 
+                #
+                # MAIN CSV
+                #
+
                 append_csv(
                     self.csv_path,
                     CSV_FIELDS,
+
                     dict(
+
                         received_at_jst=(
                             jst_time(
                                 now
@@ -740,6 +758,7 @@ class Receiver:
                 #
                 # GAP CSV
                 #
+
                 if (
                     gap
                     and
@@ -752,7 +771,9 @@ class Receiver:
                     append_csv(
                         self.gaps_path,
                         GAP_FIELDS,
+
                         dict(
+
                             vehicle_id=(
                                 packet["id"]
                             ),
@@ -804,11 +825,17 @@ class Receiver:
 
 
                 packet.update(
+
                     key=key,
+
                     source=source,
+
                     received_epoch=now,
+
                     _mono=mono,
+
                     _event_time=event_time,
+
                     _basis=basis,
 
                     count=(
@@ -856,8 +883,10 @@ class Receiver:
                 {
                     **{
                         key: value
+
                         for key, value
                         in packet.items()
+
                         if not key.startswith(
                             "_"
                         )
@@ -875,24 +904,40 @@ class Receiver:
 
 
             return dict(
+
                 vehicles=vehicles,
+
                 total=self.total,
+
                 invalid=self.invalid,
+
                 input_status=(
                     self.input_status
                 ),
+
                 log=(
                     self.log_path.name
                 ),
+
                 csv_log=(
                     self.csv_path.name
                 ),
+
                 gaps_log=(
                     self.gaps_path.name
                 ),
+
                 gap_seconds=(
                     self.gap_seconds
-                )
+                ),
+
+                csv_download=(
+                    "/api/log/current.csv"
+                ),
+
+                gaps_download=(
+                    "/api/log/current-gaps.csv"
+                ),
             )
 
 
@@ -919,6 +964,7 @@ def serial_lines(
                 baud,
                 timeout=0.5
             ) as connection:
+
 
                 receiver.input_status = (
                     f"Serial connected: "
@@ -1001,6 +1047,7 @@ def serial_lines(
                 f"{error}"
             )
 
+
             stop.wait(
                 2
             )
@@ -1015,6 +1062,7 @@ def valid_api_key(
 ):
 
     if not API_KEY:
+
         return True
 
 
@@ -1037,9 +1085,10 @@ def valid_view_auth(
 ):
 
     #
-    # If viewer credentials are not configured,
-    # Monitor UI remains public.
+    # If credentials are not configured,
+    # UI remains accessible without authentication.
     #
+
     if (
         not VIEW_USER
         or
@@ -1094,9 +1143,12 @@ def same_origin(
 
 
     #
-    # Raspberry Pi server-to-server POST
+    # Raspberry Pi server-to-server requests
+    # normally have no Origin header.
     #
+
     if not origin:
+
         return False
 
 
@@ -1144,10 +1196,12 @@ def make_handler(
 
             super().__init__(
                 *args,
+
                 directory=str(
                     ROOT
                     / "static"
                 ),
+
                 **kwargs
             )
 
@@ -1161,7 +1215,7 @@ def make_handler(
 
 
         # ----------------------------------------------------
-        # JSON response
+        # JSON RESPONSE
         # ----------------------------------------------------
 
         def send_json(
@@ -1183,10 +1237,12 @@ def make_handler(
                 status
             )
 
+
             self.send_header(
                 "Content-Type",
                 "application/json; charset=utf-8"
             )
+
 
             self.send_header(
                 "Content-Length",
@@ -1197,12 +1253,15 @@ def make_handler(
                 )
             )
 
+
             self.send_header(
                 "Cache-Control",
                 "no-store"
             )
 
+
             self.end_headers()
+
 
             self.wfile.write(
                 body
@@ -1210,7 +1269,89 @@ def make_handler(
 
 
         # ----------------------------------------------------
-        # Basic auth challenge
+        # FILE DOWNLOAD
+        # ----------------------------------------------------
+
+        def send_download(
+            self,
+            path,
+            content_type="application/octet-stream"
+        ):
+
+            if not path.exists():
+
+                return self.send_json(
+                    {
+                        "error":
+                            "Log file not found"
+                    },
+                    404
+                )
+
+
+            try:
+
+                data = (
+                    path.read_bytes()
+                )
+
+            except OSError as error:
+
+                return self.send_json(
+                    {
+                        "error":
+                            "Log read error: "
+                            + str(
+                                error
+                            )
+                    },
+                    500
+                )
+
+
+            self.send_response(
+                200
+            )
+
+
+            self.send_header(
+                "Content-Type",
+                content_type
+            )
+
+
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{path.name}"'
+            )
+
+
+            self.send_header(
+                "Content-Length",
+                str(
+                    len(
+                        data
+                    )
+                )
+            )
+
+
+            self.send_header(
+                "Cache-Control",
+                "no-store"
+            )
+
+
+            self.end_headers()
+
+
+            self.wfile.write(
+                data
+            )
+
+
+        # ----------------------------------------------------
+        # BASIC AUTH CHALLENGE
         # ----------------------------------------------------
 
         def require_view_auth(
@@ -1224,22 +1365,27 @@ def make_handler(
                 return True
 
 
-            body = b"Authentication required"
+            body = (
+                b"Authentication required"
+            )
 
 
             self.send_response(
                 401
             )
 
+
             self.send_header(
                 "WWW-Authenticate",
                 'Basic realm="Smeagol"'
             )
 
+
             self.send_header(
                 "Content-Type",
                 "text/plain; charset=utf-8"
             )
+
 
             self.send_header(
                 "Content-Length",
@@ -1250,11 +1396,14 @@ def make_handler(
                 )
             )
 
+
             self.end_headers()
+
 
             self.wfile.write(
                 body
             )
+
 
             return False
 
@@ -1268,23 +1417,38 @@ def make_handler(
         ):
 
             #
-            # Public health endpoint
+            # Render health check.
+            # Intentionally public.
             #
+
             if self.path == (
                 "/api/health"
             ):
 
                 return self.send_json(
                     {
-                        "status": "ok",
-                        "service": "smeagol"
+                        "status":
+                            "ok",
+
+                        "service":
+                            "smeagol"
                     }
                 )
 
 
+            #
+            # Everything below here requires
+            # Monitor viewer authentication.
+            #
+
             if not self.require_view_auth():
+
                 return
 
+
+            #
+            # Current vehicle state
+            #
 
             if self.path == (
                 "/api/state"
@@ -1295,6 +1459,10 @@ def make_handler(
                 )
 
 
+            #
+            # KML course
+            #
+
             if self.path == (
                 "/api/course"
             ):
@@ -1303,6 +1471,38 @@ def make_handler(
                     course
                 )
 
+
+            #
+            # Current main CSV
+            #
+
+            if self.path == (
+                "/api/log/current.csv"
+            ):
+
+                return self.send_download(
+                    receiver.csv_path,
+                    "text/csv; charset=utf-8"
+                )
+
+
+            #
+            # Current communication-gap CSV
+            #
+
+            if self.path == (
+                "/api/log/current-gaps.csv"
+            ):
+
+                return self.send_download(
+                    receiver.gaps_path,
+                    "text/csv; charset=utf-8"
+                )
+
+
+            #
+            # Static Monitor UI
+            #
 
             return super().do_GET()
 
@@ -1329,12 +1529,15 @@ def make_handler(
 
 
             #
-            # Raspberry Pi:
+            # Raspberry Pi authentication:
+            #
             # X-Smeagol-API-Key
             #
-            # Browser test:
-            # same-origin + viewer auth
+            # Browser manual/demo packet:
             #
+            # Same-origin + viewer authentication
+            #
+
             api_authorized = (
                 valid_api_key(
                     self
@@ -1419,11 +1622,13 @@ def make_handler(
 
                 source = (
                     "demo"
+
                     if
                     data.get(
                         "source"
                     )
                     == "demo"
+
                     else
                     "http"
                 )
@@ -1504,8 +1709,9 @@ class SmeagolHTTPServer(
 def main():
 
     #
-    # Cloud environment defaults
+    # Render / cloud environment defaults
     #
+
     env_port = int(
         os.environ.get(
             "PORT",
@@ -1553,6 +1759,7 @@ def main():
     parser.add_argument(
         "--kml",
         type=Path,
+
         default=(
             ROOT
             / "data"
@@ -1577,11 +1784,14 @@ def main():
     parser.add_argument(
         "--log-dir",
         type=Path,
+
         default=(
             Path(
                 env_log_dir
             )
+
             if env_log_dir
+
             else
             ROOT
             / "logs"
@@ -1628,25 +1838,44 @@ def main():
 
     print(
         f"CSV log: "
-        f"{receiver.csv_path}"
+        f"{receiver.csv_path}",
+        flush=True
     )
+
 
     print(
         f"Gap log: "
-        f"{receiver.gaps_path}"
+        f"{receiver.gaps_path}",
+        flush=True
+    )
+
+
+    print(
+        "CSV download: "
+        "/api/log/current.csv",
+        flush=True
+    )
+
+
+    print(
+        "Gap CSV download: "
+        "/api/log/current-gaps.csv",
+        flush=True
     )
 
 
     if API_KEY:
 
         print(
-            "Packet API authentication: ENABLED"
+            "Packet API authentication: ENABLED",
+            flush=True
         )
 
     else:
 
         print(
-            "Packet API authentication: DISABLED"
+            "Packet API authentication: DISABLED",
+            flush=True
         )
 
 
@@ -1657,13 +1886,15 @@ def main():
     ):
 
         print(
-            "Monitor viewer authentication: ENABLED"
+            "Monitor viewer authentication: ENABLED",
+            flush=True
         )
 
     else:
 
         print(
-            "Monitor viewer authentication: DISABLED"
+            "Monitor viewer authentication: DISABLED",
+            flush=True
         )
 
 
@@ -1675,6 +1906,7 @@ def main():
     #
     # Optional direct serial input
     #
+
     if args.serial:
 
         try:
@@ -1689,22 +1921,28 @@ def main():
 
 
         threading.Thread(
+
             target=serial_lines,
+
             args=(
                 args.serial,
                 args.baud,
                 receiver,
                 stop
             ),
+
             daemon=True
+
         ).start()
 
 
     server = SmeagolHTTPServer(
+
         (
             args.host,
             args.port
         ),
+
         make_handler(
             receiver,
             course
@@ -1714,12 +1952,15 @@ def main():
 
     print(
         f"Smeagol listening on "
-        f"{args.host}:{args.port}"
+        f"{args.host}:{args.port}",
+        flush=True
     )
+
 
     print(
         f"Course features: "
-        f"{len(course['features'])}"
+        f"{len(course['features'])}",
+        flush=True
     )
 
 
