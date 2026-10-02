@@ -6,10 +6,9 @@ const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {max
 $('tiles').onchange = () => $('tiles').checked ? tiles.addTo(map) : map.removeLayer(tiles);
 tiles.on('tileerror',()=>{$('message').textContent='背景地図を取得できません。KMLと車両表示は継続します。';});
 const markers = new Map();
-let courseLayer, course, selected, state, demoTimer, demoRunning=false, demoIndex=0, demoGeneration=0;
+let courseLayer, course, selected, state;
 function textNode(text){const el=document.createElement('span');el.textContent=text;return el;}
 async function api(url, options){const r=await fetch(url,options);const data=await r.json();if(!r.ok)throw Error(data.error||r.statusText);return data;}
-async function send(packet,source='http'){return api('/api/packet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({packet,source})});}
 function select(key,pan=false){selected=key;render();if(pan){map.setView(markers.get(key).getLatLng(),15);markers.get(key).openPopup();}}
 function render(){
   if(!state)return;
@@ -45,22 +44,9 @@ function render(){
 }
 async function poll(){try{state=await api('/api/state');$('connection').textContent='● サーバー接続中';render();}catch(e){$('connection').textContent='● サーバー切断 / 再接続中';$('message').textContent=e.message;}finally{setTimeout(poll,500);}}
 $('fit').onclick=()=>{if(courseLayer&&courseLayer.getBounds().isValid())map.fitBounds(courseLayer.getBounds(),{padding:[25,25]});};
-$('packet-form').onsubmit=async e=>{e.preventDefault();try{await send($('packet').value);$('message').textContent='受信しました。車両一覧で選択するとその位置へ移動します。';}catch(e){$('message').textContent=e.message;}};
-function stopDemo(){demoRunning=false;demoGeneration++;clearTimeout(demoTimer);$('demo').textContent='疑似走行を開始';}
-$('demo').onclick=async()=>{
-  if(demoRunning){stopDemo();return;}
-  const line=course?.features.find(f=>f.geometry.type==='LineString'&&f.properties.name.startsWith('SS')) || course?.features.find(f=>f.geometry.type==='LineString');
-  if(!line){$('message').textContent='走行用のKMLラインがありません';return;}
-  demoRunning=true;$('demo').textContent='疑似走行を停止';
-  const coords=line.geometry.coordinates;
-  const generation=++demoGeneration;
-  async function tick(){if(!demoRunning||generation!==demoGeneration)return;const [lon,lat]=coords[demoIndex++%coords.length];try{await send(`V001,${lat},${lon},30,8,0,0,0,0,0,OK`,'demo');if(demoRunning&&generation===demoGeneration)demoTimer=setTimeout(tick,1000);}catch(e){if(generation===demoGeneration){stopDemo();$('message').textContent=e.message;}}}
-  tick();
-};
 function showCourse(data,name){
   const layer=L.geoJSON(data,{style:f=>({color:f.properties.name.startsWith('SS')?'#da4a43':f.properties.name.includes('ALT')?'#9070ac':'#3b83b8',weight:3}),pointToLayer:(_,latlng)=>L.circleMarker(latlng,{radius:4,color:'#35556c',fillOpacity:0.9}),onEachFeature:(f,l)=>l.bindTooltip(textNode(f.properties.name))});
   if(!layer.getBounds().isValid())throw Error('表示できる座標がありません');
-  stopDemo();demoIndex=0;
   if(courseLayer)map.removeLayer(courseLayer);
   course=data;courseLayer=layer.addTo(map);
   $('course-name').textContent=name;$('fit').click();
