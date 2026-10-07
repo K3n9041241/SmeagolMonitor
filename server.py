@@ -168,7 +168,7 @@ def parse_packet(raw):
         len(p) not in (7, 11)
         or
         not re.fullmatch(
-            r"[A-Za-z0-9_-]{1,24}",
+            r"V(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2})",
             p[0]
         )
     ):
@@ -219,13 +219,12 @@ def parse_packet(raw):
 
 
     status = {
-        "O": "OK",
+        "L": "LIAISON",
+        "R": "SS RUN",
+        "P": "PASSABLE",
+        "B": "BLOCKED",
         "S": "SOS",
-        "C": "CRASH",
-    }.get(
-        p[-1],
-        p[-1]
-    )
+    }.get(p[-1])
 
 
     if (
@@ -235,11 +234,7 @@ def parse_packet(raw):
         or
         not sats.is_integer()
         or
-        status not in (
-            "OK",
-            "SOS",
-            "CRASH"
-        )
+        status is None
     ):
 
         raise ValueError(
@@ -255,6 +250,9 @@ def parse_packet(raw):
         satellites=int(sats),
         sensors=sensors,
         status=status,
+        status_raw=p[-1],
+        packet_fields=len(p),
+        g=sensors[0] if len(p) == 7 else None,
         raw=raw.strip(),
     )
 
