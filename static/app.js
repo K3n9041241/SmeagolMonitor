@@ -11,7 +11,32 @@ const rows = new Map(), visuals = new Map();
 let session, generation = 0, detailsVersion;
 function textNode(text){const el=document.createElement('span');el.textContent=text;return el;}
 async function api(url, options){const r=await fetch(url,options);const data=await r.json();if(!r.ok)throw Error(data.error||r.statusText);return data;}
-function select(key,pan=false){selected=key;render();if(pan){map.setView(markers.get(key).getLatLng(),15);markers.get(key).openPopup();}}
+const STATUS_DEFINITIONS = Object.freeze({
+  'LIAISON': {label:'LIAISON', css:'status-liaison', marker:'L', priority:0},
+  'SS RUN': {label:'SS RUN', css:'status-run', marker:'SS', priority:100},
+  'PASSABLE': {label:'PASSABLE ✓', css:'status-passable', marker:'✓', priority:300},
+  'BLOCKED': {label:'BLOCKED', css:'status-blocked', marker:'BLOCK', priority:600},
+  'SOS': {label:'SOS', css:'status-sos', marker:'SOS', priority:1000}
+});
+function statusDefinition(v){return STATUS_DEFINITIONS[v.status] || {label:'UNKNOWN',css:'status-unknown',marker:'?',priority:0};}
+function communicationLost(v){return v.age_s>10;}
+function statusText(v){return `${statusDefinition(v).label}${communicationLost(v)?' / LOST':''}`;}
+function markerText(v){return `${v.id} ${statusDefinition(v).marker}${communicationLost(v)?' / LOST':''}`;}
+function renderLegend(){
+  const entries=[];
+  for(const definition of Object.values(STATUS_DEFINITIONS)){
+    const entry=document.createElement('span');entry.className='legend-entry';
+    const badge=textNode(definition.marker);badge.className=`badge ${definition.css}`;
+    entry.append(badge,textNode(definition.label));entries.push(entry);
+  }
+  $('status-legend').replaceChildren(...entries);
+}
+renderLegend();
+function select(key,pan=false){
+  selected=key;render();
+  const marker=markers.get(key);
+  if(pan&&marker){map.setView(marker.getLatLng(),15,{animate:false,reset:true});marker.openPopup();}
+}
 function render(){
   if(!state)return;
   $('count').textContent=state.vehicles.length;
@@ -22,45 +47,68 @@ function render(){
     markers.clear();rows.clear();visuals.clear();selected=undefined;detailsVersion=undefined;
     $('vehicles').replaceChildren();$('details').textContent='地図上の車両番号をクリック';session=state.log;
   }
-  if(state.vehicles.length && !rows.size)$('vehicles').replaceChildren();
+  if(state.vehicles.length&&!rows.size)$('vehicles').replaceChildren();
   for(const v of state.vehicles){
-    const stale=v.age_s>10;
-    const appearance=`${v.id}|${v.status}|${v.source}|${stale}`;
+    const lost=communicationLost(v), definition=statusDefinition(v);
+    const appearance=`${v.id}|${v.status}|${v.source}|${lost}`;
     let icon;
     if(visuals.get(v.key)!==appearance){
-    const badge=textNode(v.id);badge.className='badge'+(['SOS','CRASH'].includes(v.status)?' sos':v.source==='demo'?' demo':'')+(stale?' stale':'');
-    icon=L.divIcon({html:badge,iconSize:[60,28],iconAnchor:[30,14]});
-    visuals.set(v.key,appearance);
+      const badge=textNode(markerText(v));
+      badge.className=`badge ${definition.css}${lost?' is-lost':''}${v.source==='demo'?' is-demo':''}`;
+      badge.title=`${v.id} · ${statusText(v)}`;
+      const width=Math.max(70,markerText(v).length*8+18);
+      icon=L.divIcon({html:badge,iconSize:[width,30],iconAnchor:[width/2,15]});
+      visuals.set(v.key,appearance);
     }
     if(!markers.has(v.key)){
-      const marker=L.marker([v.lat,v.lon],{icon}).addTo(map);
+      const marker=L.marker([v.lat,v.lon],{icon,zIndexOffset:definition.priority}).addTo(map);
       marker.on('click',()=>select(v.key));
       marker.on('popupopen',()=>render());
       markers.set(v.key,marker);
     }
     const marker=markers.get(v.key);
     const point=marker.getLatLng();if(point.lat!==v.lat||point.lng!==v.lon)marker.setLatLng([v.lat,v.lon]);
-    if(icon)marker.setIcon(icon);
+    if(icon){marker.setIcon(icon);marker.setZIndexOffset(definition.priority);}
     if(marker.isPopupOpen()||!marker.getPopup()){
-    const popup=document.createElement('div');
-    popup.append(textNode(`${v.id} · ${v.status} · ${v.source.toUpperCase()}`),document.createElement('br'),textNode(`速度（生値） ${v.speed} / 衛星 ${v.satellites}`),document.createElement('br'),textNode(`受信 ${v.count} 回 / ${v.age_s.toFixed(1)} 秒前`));
-    if(marker.getPopup())marker.setPopupContent(popup);else marker.bindPopup(popup);
+      const popup=document.createElement('div');
+      popup.append(textNode(`${v.id} · ${statusText(v)} · ${v.source.toUpperCase()}`),document.createElement('br'),
+        textNode(`速度 ${v.speed}${v.packet_fields===7?' km/h':'（生値）'} / 衛星 ${v.satellites}`),document.createElement('br'),
+        textNode(`受信 ${v.count} 回 / ${v.age_s.toFixed(1)} 秒前`));
+      if(marker.getPopup())marker.setPopupContent(popup);else marker.bindPopup(popup);
     }
     let button=rows.get(v.key);
-    if(!button){button=document.createElement('button');button.append(textNode(''),textNode(''));button.onclick=()=>select(v.key,true);rows.set(v.key,button);$('vehicles').append(button);}
-    button.className='vehicle'+(selected===v.key?' selected':'');
-    button.children[0].textContent=`${v.id} · ${v.source.toUpperCase()}`;button.children[1].textContent=`${v.status} · ${v.age_s.toFixed(1)}s`;
+    if(!button){
+      button=document.createElement('button');
+      for(const css of ['vehicle-id','vehicle-status','vehicle-age']){const span=textNode('');span.className=css;button.append(span);}
+      button.onclick=()=>select(v.key,true);rows.set(v.key,button);$('vehicles').append(button);
+    }
+    button.className=`vehicle ${definition.css}${lost?' is-lost':''}${selected===v.key?' selected':''}`;
+    button.title=`${v.id} · ${v.source.toUpperCase()} · ${statusText(v)} · ${v.age_s.toFixed(1)} 秒前`;
+    button.children[0].textContent=v.id;
+    button.children[1].textContent=statusText(v);
+    button.children[2].textContent=`${v.age_s.toFixed(1)}s`;
   }
   if(!state.vehicles.length)$('vehicles').textContent='受信を待っています';
   const v=state.vehicles.find(v=>v.key===selected);if(!v)return;
-  const version=`${v.key}|${v.count}|${Math.floor(v.age_s)}`;if(detailsVersion===version)return;detailsVersion=version;
+  const version=`${v.key}|${v.count}|${v.status}|${communicationLost(v)}|${Math.floor(v.age_s)}`;
+  if(detailsVersion===version)return;detailsVersion=version;
   const dl=document.createElement('dl');
-  const values={'Vehicle':v.id,'入力元':v.source,'状態':v.status,'緯度 / 経度':`${v.lat} / ${v.lon}`,'速度（単位未確認）':v.speed,'衛星数':v.satellites,'最終受信':new Date(v.received_epoch*1000).toLocaleTimeString(),'経過':`${v.age_s.toFixed(1)} 秒${v.age_s>10?'（10秒以上未受信）':''}`,'受信間隔':v.interval_s===null?'—':`${v.interval_s.toFixed(3)} 秒`,'受信回数':v.count};
-  v.sensors.forEach((n,i)=>values[`センサー値 ${i+1}`]=n);
+  const values={'Vehicle':v.id,'入力元':v.source,'STATUS':statusDefinition(v).label,
+    '通信状態':communicationLost(v)?'LOST（10秒超未受信）':'受信中',
+    '緯度 / 経度':`${v.lat} / ${v.lon}`,
+    [v.packet_fields===7?'速度（km/h）':'速度（生値）']:v.speed,'衛星数':v.satellites,
+    '最終受信時刻':new Date(v.received_epoch*1000).toLocaleString(),
+    '経過時間':`${v.age_s.toFixed(1)} 秒`,
+    '受信間隔':v.interval_s===null?'—':`${v.interval_s.toFixed(3)} 秒`,
+    '受信回数':v.count};
+  if(v.packet_fields===7)values.G=v.g;
+  else v.sensors.forEach((n,i)=>values[`センサー値 ${i+1}`]=n);
   for(const [k,val] of Object.entries(values)){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=k;dd.textContent=val;dl.append(dt,dd);}
+  const label=document.createElement('h3');label.textContent='RAW packet';
   const raw=document.createElement('pre');raw.textContent=v.raw;
-  $('details').replaceChildren(dl,raw);
+  $('details').replaceChildren(dl,label,raw);
 }
+
 let resetting=false;
 async function poll(){
   const started=performance.now(), stamp=generation;
