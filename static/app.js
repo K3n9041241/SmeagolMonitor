@@ -8,7 +8,14 @@ tiles.on('tileerror',()=>{$('message').textContent='背景地図を取得でき�
 const markers = new Map();
 let courseLayer, course, selected, state;
 const rows = new Map(), visuals = new Map();
-let session, generation = 0, detailsVersion;
+let session, generation = 0, detailsVersion, stateClock = performance.now();
+function applyState(next){state=next;stateClock=performance.now();render();}
+function refreshAges(){
+  if(!state)return;
+  const now=performance.now(), elapsed=(now-stateClock)/1000;stateClock=now;
+  for(const vehicle of state.vehicles)vehicle.age_s+=elapsed;
+  render();
+}
 function textNode(text){const el=document.createElement('span');el.textContent=text;return el;}
 async function api(url, options){const r=await fetch(url,options);const data=await r.json();if(!r.ok)throw Error(data.error||r.statusText);return data;}
 const STATUS_DEFINITIONS = Object.freeze({
@@ -98,6 +105,8 @@ function render(){
     '緯度 / 経度':`${v.lat} / ${v.lon}`,
     [v.packet_fields===7?'速度（km/h）':'速度（生値）']:v.speed,'衛星数':v.satellites,
     '最終受信時刻':new Date(v.received_epoch*1000).toLocaleString(),
+    'Base受信時刻':v.base_received_epoch==null?'未提供':new Date(v.base_received_epoch*1000).toLocaleString(),
+    'Base→Monitor':v.transport_delay_s==null?'未提供':v.transport_delay_s<0?'時計のずれあり':`${v.transport_delay_s.toFixed(2)} 秒（時計のずれを含む）`,
     '経過時間':`${v.age_s.toFixed(1)} 秒`,
     '受信間隔':v.interval_s===null?'—':`${v.interval_s.toFixed(3)} 秒`,
     '受信回数':v.count};
@@ -109,21 +118,42 @@ function render(){
   $('details').replaceChildren(dl,label,raw);
 }
 
-let resetting=false;
+let resetting=false, pollTimer, pollController, pollBusy=false, pollFailures=0;
+function schedulePoll(delay=0){clearTimeout(pollTimer);pollTimer=setTimeout(poll,delay);}
 async function poll(){
+  if(pollBusy)return;
+  if(resetting){schedulePoll(250);return;}
+  pollBusy=true;
   const started=performance.now(), stamp=generation;
+  let delay=0;
+  pollController=new AbortController();
+  const timeout=setTimeout(()=>pollController?.abort(),25000);
   try{
-    if(!resetting){const next=await api('/api/state',{signal:AbortSignal.timeout(5000)});
-      if(stamp===generation){state=next;$('connection').textContent='● サーバー接続中';render();}}
-  }catch(e){$('connection').textContent='● サーバー切断 / 再接続中';$('message').textContent=e.message;}
-  finally{setTimeout(poll,Math.max(0,(document.hidden?2000:500)-(performance.now()-started)));}
+    const revision=state?.revision;
+    const waiting=Number.isInteger(revision);
+    const url=waiting?`/api/state?after=${revision}&wait=20`:'/api/state';
+    const next=await api(url,{signal:pollController.signal,cache:'no-store'});
+    if(stamp===generation&&!resetting){
+      pollFailures=0;$('connection').textContent='● サーバー接続中';
+      if(!waiting||next.revision!==revision||next.log!==state.log)applyState(next);
+      if(!Number.isInteger(next.revision))delay=Math.max(0,500-(performance.now()-started));
+    }
+  }catch(e){
+    if(stamp===generation&&!resetting&&e.name!=='AbortError'){
+      $('connection').textContent='● サーバー切断 / 再接続中';$('message').textContent=e.message;
+      delay=Math.min(10000,1000*2**Math.min(pollFailures++,4));
+    }else if(stamp===generation&&!resetting){delay=1000;}
+  }finally{
+    clearTimeout(timeout);pollBusy=false;pollController=undefined;
+    schedulePoll(document.hidden?Math.max(delay,2000):delay);
+  }
 }
 $('reset').onclick=async()=>{
   if(!confirm('現在の受信セッションをリセットします。過去ログは残ります。続けますか？'))return;
-  resetting=true;generation++;$('reset').disabled=true;
-  try{state=await api('/api/reset',{method:'POST',signal:AbortSignal.timeout(10000)});render();$('message').textContent='リセットしました。新しいログセッションで受信を開始します。';}
+  resetting=true;generation++;pollController?.abort();$('reset').disabled=true;
+  try{applyState(await api('/api/reset',{method:'POST',signal:AbortSignal.timeout(10000)}));$('message').textContent='リセットしました。新しいログセッションで受信を開始します。';}
   catch(e){$('message').textContent=`リセット結果を確認できません: ${e.message}`;}
-  finally{resetting=false;$('reset').disabled=false;}
+  finally{resetting=false;$('reset').disabled=false;schedulePoll();}
 };
 $('fit').onclick=()=>{if(courseLayer&&courseLayer.getBounds().isValid())map.fitBounds(courseLayer.getBounds(),{padding:[25,25]});};
 function showCourse(data,name){
@@ -182,4 +212,8 @@ $('kml-file').onchange=async e=>{
   finally{$('kml-file').value='';}
 };
 api('/api/course').then(data=>{if(courseChoice===0)showCourse(data,'JRC2SR26 · Leg 1');}).catch(e=>{$('message').textContent=`KML読み込みエラー: ${e.message}`;});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){refreshAges();if(pollBusy)pollController?.abort();else schedulePoll();}
+});
+setInterval(()=>{if(!document.hidden)refreshAges();},1000);
 poll();

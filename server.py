@@ -36,7 +36,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 
 # ============================================================
@@ -369,6 +369,8 @@ class Receiver:
     ):
 
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
+        self.revision = 0
 
         self.vehicles = {}
 
@@ -406,6 +408,8 @@ class Receiver:
             self._new_session()
             self.vehicles.clear()
             self.total = self.invalid = 0
+            self.revision += 1
+            self.changed.notify_all()
         return self.snapshot()
 
     # ========================================================
@@ -799,6 +803,9 @@ class Receiver:
                     source=source,
 
                     received_epoch=now,
+                    base_received_epoch=base_received_epoch,
+                    transport_delay_s=(now - base_received_epoch
+                                       if base_received_epoch is not None else None),
 
                     _mono=mono,
 
@@ -825,6 +832,9 @@ class Receiver:
                     key
                 ] = packet
 
+            self.revision += 1
+            self.changed.notify_all()
+
 
         if packet is None:
 
@@ -842,9 +852,11 @@ class Receiver:
     # SNAPSHOT
     # ========================================================
 
-    def snapshot(self):
+    def snapshot(self, after=None, timeout=0):
 
-        with self.lock:
+        with self.changed:
+            if after is not None and timeout > 0:
+                self.changed.wait_for(lambda: self.revision != after, timeout)
 
             vehicles = [
 
@@ -872,6 +884,7 @@ class Receiver:
 
 
             return dict(
+                revision=self.revision,
 
                 vehicles=vehicles,
 
@@ -1418,13 +1431,17 @@ def make_handler(
             # Current vehicle state
             #
 
-            if self.path == (
-                "/api/state"
-            ):
-
-                return self.send_json(
-                    receiver.snapshot()
-                )
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/state":
+                try:
+                    query = parse_qs(parsed.query)
+                    after = int(query['after'][0]) if 'after' in query else None
+                    wait = float(query.get('wait', ['0'])[0])
+                    if not math.isfinite(wait) or not 0 <= wait <= 20:
+                        raise ValueError('wait must be between 0 and 20 seconds')
+                except (ValueError, IndexError) as error:
+                    return self.send_json({'error': str(error)}, 400)
+                return self.send_json(receiver.snapshot(after, wait))
 
 
             #
